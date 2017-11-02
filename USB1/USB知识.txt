@@ -1,0 +1,341 @@
+USB设备其实很复杂，但是Linux内核提供了一个称为USB core的子系统来处理了大部分的复杂工作，所以这里所描述的是驱动程序和USB core之间的接口。
+在USB设备组织结构中，从上到下分为设备（device）、配置（config）、接口（interface）和端点（endpoint）四个层次。
+对于这四个层次的简单描述如下：
+    设备通常具有一个或多个的配置
+    配置经常具有一个或多个的接口
+    接口通常具有一个或多个的设置
+    接口没有或具有一个以上的端点
+	设备
+很明显，dev代表了一个插入的USB设备，在内核使用数据结构 struct usb_device来描述整个USB设备。（include/linux/usb.h）
+　　struct usb_device {
+　　 int devnum; //设备号，是在USB总线的地址
+　　 char devpath [16]; //用于消息的设备ID字符串
+　　 enum usb_device_state state; //设备状态：已配置、未连接等等
+　　 enum usb_device_speed speed; //设备速度：高速、全速、低速或错误
+　　
+　　 struct usb_tt *tt; //处理传输者信息；用于低速、全速设备和高速HUB
+　　 int ttport; //位于tt HUB的设备口
+　　
+　　 unsigned int toggle[2]; //每个端点的占一位，表明端点的方向([0] = IN, [1] = OUT)　　
+　　 struct usb_device *parent; //上一级HUB指针
+　　 struct usb_bus *bus; //总线指针
+　　 struct usb_host_endpoint ep0; //端点0数据
+　　 struct device dev; //一般的设备接口数据结构
+　
+　　 struct usb_device_descriptor descriptor; //USB设备描述符
+　　 struct usb_host_config *config; //设备的所有配置
+　　 struct usb_host_config *actconfig; //被激活的设备配置
+　　 struct usb_host_endpoint *ep_in[16]; //输入端点数组
+　　 struct usb_host_endpoint *ep_out[16]; //输出端点数组
+　　
+　　 char **rawdescriptors; //每个配置的raw描述符
+　　
+　　 unsigned short bus_mA; //可使用的总线电流
+
+　　 u8 portnum; //父端口号
+　　 u8 level; //USB HUB的层数
+　　
+　　 unsigned can_submit:1; //URB可被提交标志
+　　 unsigned discon_suspended:1; //暂停时断开标志
+　　 unsigned persist_enabled:1; //USB_PERSIST使能标志
+　　 unsigned have_langid:1; //string_langid存在标志
+　　 unsigned authorized:1; 
+　　 unsigned authenticated:1;
+　　 unsigned wusb:1; //无线USB标志
+　　 int string_langid; //字符串语言ID
+　　
+　　 /* static strings from the device */ //设备的静态字符串
+　　 char *product; //产品名
+　　 char *manufacturer; //厂商名
+　　 char *serial; //产品串号
+　　
+　　 struct list_head filelist; //此设备打开的usbfs文件
+　　#ifdef CONFIG_USB_DEVICE_CLASS
+　　 struct device *usb_classdev; //用户空间访问的为usbfs设备创建的USB类设备
+　　#endif
+　　#ifdef CONFIG_USB_DEVICEFS
+　　 struct dentry *usbfs_dentry; //设备的usbfs入口
+　　#endif
+　　
+　　 int maxchild; //（若为HUB）接口数
+　　 struct usb_device *children[USB_MAXCHILDREN];//连接在这个HUB上的子设备
+　　 int pm_usage_cnt; //自动挂起的使用计数
+　　 u32 quirks; 
+　　 atomic_t urbnum; //这个设备所提交的URB计数
+　　
+　　 unsigned long active_duration; //激活后使用计时
+
+　　#ifdef CONFIG_PM //电源管理相关
+　　 struct delayed_work autosuspend; //自动挂起的延时
+　　 struct work_struct autoresume; //（中断的）自动唤醒需求
+　　 struct mutex pm_mutex; //PM的互斥锁　
+　 
+　　 unsigned long last_busy; //最后使用的时间
+　　 int autosuspend_delay; 
+　　 unsigned long connect_time; //第一次连接的时间
+　　
+　　 unsigned auto_pm:1; //自动挂起/唤醒
+　　 unsigned do_remote_wakeup:1; //远程唤醒
+　　 unsigned reset_resume:1; //使用复位替代唤醒
+　　 unsigned autosuspend_disabled:1; //挂起关闭
+　　 unsigned autoresume_disabled:1; //唤醒关闭
+　　 unsigned skip_sys_resume:1; //跳过下个系统唤醒
+　　#endif
+　　 struct wusb_dev *wusb_dev; //（如果为无线USB）连接到WUSB特定的数据结构
+　　};
+ 
+
+配置
+    一个USB设备可以有多个配置，并可在它们之间转换以改变设备的状态。
+	比如一个设备可以通过下载固件（firmware）的方式改变设备的使用状态（我 感觉类似FPGA或CPLD），那么USB设备就要切换配置，
+	来完成这个工作。一个时刻只能有一个配置可以被激活。Linux使用结构 struct usb_host_config 来描述USB配置。
+	我们编写的USB设备驱动通常不需要读写这些结构的任何值。可在内核源码的文件include/linux/usb.h中找到对它们的 描述。
+struct usb_host_config {
+    struct usb_config_descriptor desc; //配置描述符
+    char *string; /* 配置的字符串指针（如果存在） */
+    struct usb_interface_assoc_descriptor *intf_assoc[USB_MAXIADS]; //配置的接口联合描述符链表
+    struct usb_interface *interface[USB_MAXINTERFACES]; //接口描述符链表
+    struct usb_interface_cache *intf_cache[USB_MAXINTERFACES]; 
+    unsigned char *extra; /* 额外的描述符 */
+    int extralen;
+};
+ 
+
+接口
+USB 端点被绑为接口，USB接口只处理一种USB逻辑连接。一个USB接口代表一个基本功能，每个USB驱动控制一个接口。
+所以一个物理上的硬件设备可能需要 一个以上的驱动程序。这可以在“晕到死 差屁”系统中看出，有时插入一个USB设备后，
+系统会识别出多个设备，并安装相应多个的驱动。
+USB 接口可以有其他的设置,它是对接口参数的不同选择. 接口的初始化的状态是第一个设置,编号为0。 
+其他的设置可以以不同方式控制独立的端点。
+USB接口在内核中使用 struct usb_interface 来描述。USB 核心将其传递给USB驱动，并由USB驱动负责后续的控制。
+struct usb_interface {
+    struct usb_host_interface *altsetting; /* 包含所有可用于该接口的可选设置的接口结构数组。
+	每个 struct usb_host_interface 包含一套端点配置（即struct usb_host_endpoint结构所定义的端点配置。
+	这些接口结构没有特别的顺序。*/
+    struct usb_host_interface *cur_altsetting; /* 指向altsetting内部的指针，表示当前激活的接口配置*/
+    unsigned num_altsetting; /* 可选设置的数量*/
+    /* If there is an interface association descriptor then it will list the associated interfaces */
+    struct usb_interface_assoc_descriptor *intf_assoc;
+    int minor; /* 如果绑定到这个接口的 USB 驱动使用 USB 主设备号, 这个变量包含由 USB 核心分配给接口的次设备号. 
+	这只在一个成功的调用 usb_register_dev后才有效。*/
+    /*以下的数据在我们写的驱动中基本不用考虑，系统会自动设置*/
+    enum usb_interface_condition condition; /* state of binding */
+    unsigned is_active:1; /* the interface is not suspended */
+    unsigned sysfs_files_created:1; /* the sysfs attributes exist */
+    unsigned ep_devs_created:1; /* endpoint "devices" exist */
+    unsigned unregistering:1; /* unregistration is in progress */
+    unsigned needs_remote_wakeup:1; /* driver requires remote wakeup */
+    unsigned needs_altsetting0:1; /* switch to altsetting 0 is pending */
+    unsigned needs_binding:1; /* needs delayed unbind/rebind */
+    unsigned reset_running:1;
+    struct device dev; /* 接口特定的设备信息 */
+    struct device *usb_dev;
+    int pm_usage_cnt; /* usage counter for autosuspend */
+    struct work_struct reset_ws; /* for resets in atomic context */
+};
+struct usb_host_interface {
+    struct usb_interface_descriptor desc; //接口描述符
+    struct usb_host_endpoint *endpoint; /* 这个接口的所有端点结构体的联合数组*/
+    char *string; /* 接口描述字符串 */
+    unsigned char *extra; /* 额外的描述符 */
+    int extralen;
+};
+ 
+ 
+端点
+USB 通讯的最基本形式是通过一个称为端点的东西。一个USB端点只能向一个方向传输数据（从主机到设备(称为输出端点)或者从设备到主机
+(称为输入端点)）。端点可被看作一个单向的管道。
+一个 USB 端点有 4 种不同类型, 分别具有不同的数据传送方式：
+控制CONTROL 
+控 制端点被用来控制对 USB 设备的不同部分访问. 通常用作配置设备、获取设备信息、发送命令到设备或获取设备状态报告。
+这些端点通常较小。每个 USB 设备都有一个控制端点称为"端点 0", 被 USB 核心用来在插入时配置设备。
+USB协议保证总有足够的带宽留给控制端点传送数据到设备.
+中断INTERRUPT 
+每当 USB 主机向设备请求数据时，中断端点以固定的速率传送小量的数据。此为USB 键盘和鼠标的主要的数据传送方法。
+它还用以传送数据到 USB 设备来控制设备。通常不用来传送大量数据。USB协议保证总有足够的带宽留给中断端点传送数据到设备.
+批量BULK 
+批 量端点用以传送大量数据。这些端点常比中断端点大得多. 它们普遍用于不能有任何数据丢失的数据。
+USB 协议不保证传输在特定时间范围内完成。如果总线上没有足够的空间来发送整个BULK包，它被分为多个包进行传输。
+这些端点普遍用于打印机、USB Mass Storage和USB网络设备上。
+等时ISOCHRONOUS 
+等时端点也批量传送大量数据, 但是这个数据不被保证能送达。这些端点用在可以处理数据丢失的设备中，并且更多依赖于保持持续的数据流。
+如音频和视频设备等等。
+控制和批量端点用于异步数据传送，而中断和同步端点是周期性的。这意味着这些端点被设置来在固定的时间连续传送数据，
+USB 核心为它们保留了相应的带宽。
+端点在内核中使用结构 struct usb_host_endpoint 来描述，它所包含的真实端点信息在另一个结构中：struct usb_endpoint_descriptor（
+端点描述符，包含所有的USB特定数据）。
+struct usb_host_endpoint {
+    struct usb_endpoint_descriptor desc; //端点描述符
+    struct list_head urb_list; //此端点的URB对列，由USB核心维护
+    void *hcpriv;
+    struct ep_device *ep_dev; /* For sysfs info */
+    unsigned char *extra; /* Extra descriptors */
+    int extralen;
+    int enabled;
+};
+/*-------------------------------------------------------------------------*/
+/* USB_DT_ENDPOINT: Endpoint descriptor */
+struct usb_endpoint_descriptor {
+    __u8 bLength;
+    __u8 bDescriptorType;
+    __u8 bEndpointAddress; /*这个特定端点的 USB 地址，这个8位数据包含端点的方向，结合位掩码 USB_DIR_OUT 和 USB_DIR_IN 使用,
+	确定这个端点的数据方向。*/
+    __u8 bmAttributes; //这是端点的类型，位掩码如下
+    __le16 wMaxPacketSize; /*端点可以一次处理的最大字节数。驱动可以发送比这个值大的数据量到端点, 
+	但是当真正传送到设备时，数据会被分为 wMaxPakcetSize 大小的块。对于高速设备, 通过使用高位部分几个额外位，
+	可用来支持端点的高带宽模式。*/
+    __u8 bInterval; //如果端点是中断类型，该值是端点的间隔设置，即端点的中断请求间的间隔时间，以毫秒为单位
+    /* NOTE: these two are _only_ in audio endpoints. */
+    /* use USB_DT_ENDPOINT*_SIZE in bLength, not sizeof. */
+    __u8 bRefresh;
+    __u8 bSynchAddress;
+} __attribute__ ((packed));
+#define USB_DT_ENDPOINT_SIZE 7
+#define USB_DT_ENDPOINT_AUDIO_SIZE 9 /* Audio extension */
+/*
+ * Endpoints
+ */
+#define USB_ENDPOINT_NUMBER_MASK 0x0f /* in bEndpointAddress 端点的 USB 地址掩码 */
+#define USB_ENDPOINT_DIR_MASK 0x80 /* in bEndpointAddress 数据方向掩码 */
+
+#define USB_DIR_OUT 0 /* to device */
+#define USB_DIR_IN 0x80 /* to host */
+#define USB_ENDPOINT_XFERTYPE_MASK 0x03 /* bmAttributes 的位掩码*/
+#define USB_ENDPOINT_XFER_CONTROL 0
+#define USB_ENDPOINT_XFER_ISOC 1
+#define USB_ENDPOINT_XFER_BULK 2
+#define USB_ENDPOINT_XFER_INT 3
+#define USB_ENDPOINT_MAX_ADJUSTABLE 0x80
+/*********************************************************************************************************************************/
+
+
+void *usb_buffer_alloc (struct usb_device *dev, size_t size, gfp_t mem_flags, dma_addr_t *dma);
+这个函数是 usbcore 提供的 . 从名字上就能知道它是用来申请内存的 ,内核中给出了一些介绍。
+* usb_buffer_alloc - allocate dma-consistent buffer for URB_NO_xxx_DMA_MAP
+ * @dev: device the buffer will be used with
+ * @size: requested buffer size
+ * @mem_flags: affect whether allocation may block
+ * @dma: used to return DMA address of buffer
+ *
+ * Return value is either null (indicating no buffer could be allocated), or
+ * the cpu-space pointer to a buffer that may be used to perform DMA to the
+ * specified device.  Such cpu-space buffers are returned along with the DMA
+ * address (through the pointer provided).
+ *
+ * These buffers are used with URB_NO_xxx_DMA_MAP set in urb->transfer_flags
+ * to avoid behaviors like using "DMA bounce buffers", or tying down I/O
+ * mapping hardware for long idle periods.  The implementation varies between
+ * platforms, depending on details of how DMA will work to this device.
+ * Using these buffers also helps prevent cacheline sharing problems on
+ * architectures where CPU caches are not DMA-coherent.
+ *
+ * When the buffer is no longer used, free it with usb_buffer_free().
+第一个参数就是 struct usb_device 结构体的指针 , 第二个参数申请的 buffer 的大小 , 第三个参数 ,GFP_KERNEL, 
+是一个内存申请的 flag, 通常内存申请都用这个 flag, 除非是中断上下文 , 不能睡眠 , 那就得用 GPF_ATOMIC, 这里没那么多要求 .
+而 usb_buffer_alloc() 的第四个参数 涉及到 dma 传输 .该函数不仅进行内存分配，还会进行DMA映射，这里第四个参数将被设置为DMA地址。
+这个地址用于传输DMA缓冲区数据的urb。
+用 usb_buffer_alloc 申请的内存空间需要用它的搭档 usb_buffer_free() 来释放 .	
+
+/*********************************************************************************************************************************/
+
+1．urb 结构体
+USB 请求块（USB request block，urb）是USB 设备驱动中用来描述与USB 设备通信所用的基本载体和核心数据结构，非常类似于网络设备驱动中的sk_buff 结构体。
+struct urb {
+/* 私有的：只能由USB 核心和主机控制器访问的字段 */
+struct kref kref; /*urb 引用计数 */
+void *hcpriv; /* 主机控制器私有数据 */
+atomic_t use_count; /* 并发传输计数 */
+u8 reject; /* 传输将失败*/
+int unlink; /* unlink 错误码 */
+ /* 公共的： 可以被驱动使用的字段 */
+ struct list_head urb_list; /* 链表头*/
+struct usb_anchor *anchor;
+ struct usb_device *dev; /* 关联的USB 设备 */
+ struct usb_host_endpoint *ep;
+unsigned int pipe; /* 管道信息 */
+ int status; /* URB 的当前状态 */
+ unsigned int transfer_flags; /* URB_SHORT_NOT_OK | ...*/
+ void *transfer_buffer; /* 发送数据到设备或从设备接收数据的缓冲区 */
+ dma_addr_t transfer_dma; /*用来以DMA 方式向设备传输数据的缓冲区 */
+ int transfer_buffer_length;/*transfer_buffer 或transfer_dma 指向缓冲区的大小 */
+ 
+ int actual_length; /* URB 结束后，发送或接收数据的实际长度 */
+ unsigned char *setup_packet; /* 指向控制URB 的设置数据包的指针*/
+ dma_addr_t setup_dma; /*控制URB 的设置数据包的DMA 缓冲区*/
+ int start_frame; /*等时传输中用于设置或返回初始帧*/
+ int number_of_packets; /*等时传输中等时缓冲区数量 */
+ int interval; /* URB 被轮询到的时间间隔（对中断和等时urb 有效） */
+ int error_count; /* 等时传输错误数量 */
+ void *context; /* completion 函数上下文 */
+ usb_complete_t complete; /* 当URB 被完全传输或发生错误时，被调用 */
+ /*单个URB 一次可定义多个等时传输时，描述各个等时传输 */
+ struct usb_iso_packet_descriptor iso_frame_desc[0];
+};
+　　
+
+2．urb 处理流程
+USB 设备中的每个端点都处理一个urb 队列，在队列被清空之前，一个urb 的典型生命周期
+如下。
+（1）被一个USB 设备驱动创建。
+创建urb 结构体的函数为：
+struct urb *usb_alloc_urb(int iso_packets, int mem_flags);
+iso_packets 是这个urb 应当包含的等时数据包的数目，若为0 表示不创建等时数据包。
+mem_flags 参数是分配内存的标志，和kmalloc()函数的分配标志参数含义相同。如果分配成功，该函数返回一个urb 结构体指针，否则返回0。
+urb 结构体在驱动中不能静态创建，因为这可能破坏USB 核心给urb 使用的引用计数方法。
+
+usb_alloc_urb()的“反函数”为：
+void usb_free_urb(struct urb *urb);
+该函数用于释放由usb_alloc_urb()分配的urb 结构体。
+
+（2）初始化，被安排给一个特定USB 设备的特定端点。
+对于中断urb，使用usb_fill_int_urb()函数来初始化urb，如下所示：
+void usb_fill_int_urb(struct urb *urb, struct usb_device *dev,unsigned int pipe, void *transfer_buffer,int buffer_length, usb_complete_t complete,void *context, int interval);
+urb 参数指向要被初始化的urb 的指针；dev 指向这个urb 要被发送到的USB 设备；pipe 是这个urb 要被发送到的USB 设备的特定端点；transfer_buffer 是指向发送数据或接收数据的缓冲区的指针，和urb 一样，它也不能是静态缓冲区，必须使用kmalloc()来分配；buffer_length 是transfer_buffer 指针所指向缓冲区的大小；complete 指针指向当这个 urb 完成时被调用的完成处理函数；context 是完成处理函数的“上下文”；interval 是这个urb 应当被调度的间隔。
+上述函数参数中的pipe 使用usb_sndintpipe()或usb_rcvintpipe()创建。
+对于批量urb，使用usb_fill_bulk_urb()函数来初始化urb，如下所示：
+void usb_fill_bulk_urb(struct urb *urb, struct usb_device *dev,unsigned int pipe, void *transfer_buffer,int buffer_length, usb_complete_t complete,void *context);
+除了没有对应于调度间隔的interval 参数以外，该函数的参数和usb_fill_int_urb()函数的参数含义相同。
+上述函数参数中的pipe 使用usb_sndbulkpipe()或者usb_rcvbulkpipe()函数来创建。
+
+
+对于控制 urb，使用usb_fill_control_urb()函数来初始化urb，如下所示：
+void usb_fill_control_urb(struct urb *urb, struct usb_device *dev,unsigned int pipe, unsigned char *setup_packet,void *transfer_buffer, int buffer_length,usb_complete_t complete, void *context);
+除了增加了新的setup_packet 参数以外，该函数的参数和usb_fill_bulk_urb()函数的参数含义相同。setup_packet 参数指向即将被发送到端点的设置数据包。
+上述函数参数中的pipe 使用usb_sndctrlpipe()或usb_rcvictrlpipe()函数来创建。
+
+
+ 
+
+（3）被USB 设备驱动提交给USB 核心。
+在完成第（1）、（2）步的创建和初始化urb 后，urb 便可以提交给USB 核心，通过usb_submit_urb()函数来完成，如下所示：
+int usb_submit_urb(struct urb *urb, int mem_flags);
+urb 参数是指向urb 的指针，mem_flags 参数与传递给kmalloc()函数参数的意义相同，它用于告知USB 核心如何在此时分配内存缓冲区。
+在提交urb 到USB 核心后，直到完成函数被调用之前，不要访问urb 中的任何成员。
+
+
+usb_submit_urb()在原子上下文和进程上下文中都可以被调用，mem_flags 变量需根据调用环
+境进行相应的设置，如下所示。
+GFP_ATOMIC：在中断处理函数、底半部、tasklet、定时器处理函数以及urb 完成函数中，在调用者持有自旋锁或者读写锁时以及当驱动将current→state 修改为非 TASK_RUNNING 时，应使用此标志。
+GFP_NOIO：在存储设备的块I/O 和错误处理路径中，应使用此标志；
+GFP_KERNEL：如果没有任何理由使用GFP_ATOMIC 和GFP_NOIO，就使用GFP_KERNEL。
+
+如果usb_submit_urb()调用成功，即urb 的控制权被移交给USB 核心，该函数返回0；否则，
+返回错误号。
+（4）提交由USB 核心指定的USB 主机控制器驱动。
+（5）被USB 主机控制器处理，进行一次到USB 设备的传送。
+第（4）～（5）步由USB 核心和主机控制器完成，不受USB 设备驱动的控制。
+（6）当urb 完成，USB 主机控制器驱动通知USB 设备驱动。
+
+在如下3 种情况下，urb 将结束，urb 完成函数将被调用。
+1、urb 被成功发送给设备，并且设备返回正确的确认。如果urb→status 为0，意味着对于一个输出urb，数据被成功发送；对于一个输入urb，请求的数据被成功收到。
+2、如果发送数据到设备或从设备接收数据时发生了错误，urb→status 将记录错误值。
+3、urb 被从USB 核心“去除连接”，这发生在驱动通过usb_unlink_urb()或usb_kill_urb()函数取消urb，或urb 虽已提交，而USB 设备被拔出的情况下。
+
+当urb 生命结束时（处理完成或被解除链接），通过urb 结构体的status 成员可以获知其原因，
+如0 表示传输成功，-ENOENT 表示被usb_kill_urb()杀死，-ECONNRESET 表示被usb_unlink_urb()
+杀死，-EPROTO 表示传输中发生了bitstuff 错误或者硬件未能及时收到响应数据包，-ENODEV
+表示USB 设备已被移除，-EXDEV 表示等时传输仅完成了一部分等。
+
+/*********************************************************************************************************************************/
+
+
