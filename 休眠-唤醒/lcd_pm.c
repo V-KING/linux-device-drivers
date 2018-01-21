@@ -50,12 +50,122 @@ static volatile unsigned long *gpdcon;
 static volatile unsigned long *gpgcon;
 static volatile struct lcd_regs* lcd_regs;
 
+static int s3c_lcdfb_setcolreg(unsigned int regno, unsigned int red,			     
+								unsigned int green, unsigned int blue,			     
+								unsigned int transp, struct fb_info *info)
+{	
+	unsigned int val;		
+	if (regno > 16)		
+		return 1;	/* 用red,green,blue三原色构造出val */	
+	val  = chan_to_field(red,	&info->var.red);	
+	val |= chan_to_field(green, &info->var.green);	
+	val |= chan_to_field(blue,	&info->var.blue);		
+	
+	pseudo_palette[regno] = val;	
+	return 0;
+}
+
 static struct fb_ops s3c_lcdfb_ops = {	
 	.owner		= THIS_MODULE,	
 	.fb_setcolreg	= s3c_lcdfb_setcolreg,	
 	.fb_fillrect	= cfb_fillrect,	
 	.fb_copyarea	= cfb_copyarea,	
 	.fb_imageblit	= cfb_imageblit,
+};
+
+static int lcd_suspend_notifier(struct notifier_block *nb, unsigned long event, void *dummy)
+{
+	switch(event) 
+	{
+	case PM_SUSPEND_PREPARE:
+		printk(" lcd suspend notifiler test : PM_SUSPEND_PREPARE\n ");
+		return NOTIFY_OK;
+
+	case PM_POST_SUSPEND:
+		printk(" lcd suspend notifiler test : PM_POST_SUSPEND\n ");
+		return NOTIFY_OK;
+
+	default:
+		return NOTIFY_DONE;
+	}
+}
+
+struct notifier_block * lcd_pm_notif_block = {
+	.notifier_call = lcd_suspend_notifier,
+};
+
+static void lcd_release(struct device *dev)
+{
+}
+
+struct platform_device lcd_dev = {
+	.name = "lcd_pm",
+	.id = -1,
+	.dev = {
+		.release = lcd_release,
+	},	
+};
+
+static struct lcd_regs lcd_regs_backup; 
+
+static int lcd_suspend(struct device *dev)
+{
+	int i;	
+	unsigned long *dest = &lcd_regs_backup;	
+	unsigned long *src  = lcd_regs;		
+	for (i = 0; i < sizeof(lcd_regs_backup)/sizeof(unsigned long); i++)	
+	{		
+		dest[i] = src[i];	
+	}		
+	lcd_regs->lcdcon1 &= ~(1<<0); /* 关闭LCD本身 */	
+	*gpbdat &= ~1;     /* 关闭背光 */	
+	return 0;
+}
+
+static int lcd_resume(struct device *dev)
+{
+	int i;
+	unsigned long *dest = lcd_regs;	
+	unsigned long *src  = &lcd_regs_backup;	
+	struct clk *clk = clk_get(NULL, "lcd");	
+	clk_enable(clk);	clk_put(clk);
+	lcd_regs->lcdcon1 = lcd_regs_backup.lcdcon1 & ~1;	
+	lcd_regs->lcdcon2 = lcd_regs_backup.lcdcon2;	
+	lcd_regs->lcdcon3 = lcd_regs_backup.lcdcon3;	
+	lcd_regs->lcdcon4 = lcd_regs_backup.lcdcon4;	
+	lcd_regs->lcdcon5 = lcd_regs_backup.lcdcon5;	
+	lcd_regs->lcdsaddr1 = lcd_regs_backup.lcdsaddr1;	
+	lcd_regs->lcdsaddr2 = lcd_regs_backup.lcdsaddr2;	
+	lcd_regs->lcdsaddr3 = lcd_regs_backup.lcdsaddr3;
+	
+	lcd_regs->lcdcon1 |= (1<<0); /* 使能LCD控制器 */	
+	lcd_regs->lcdcon5 |= (1<<3); /* 使能LCD本身 */	
+	*gpbdat |= 1;     /* 输出高电平, 使能背光 */			
+	return 0;
+}
+
+static struct dev_pm_ops lcd_pm = {
+	.suspend = lcd_suspend,
+	.resume   = lcd_resume, 	
+}; 
+
+static int lcd_probe(struct platform_device *pdev)
+{
+	return 0;
+}
+
+static int lcd_remove(struct platform_device *pdev)
+{
+	return 0;
+}
+
+struct platform_driver lcd_drv = {
+	.probe = lcd_probe,
+	.remove = lcd_remove,
+	.driver = {
+		.name = "lcd_pm",
+		.pm     = &lcd_pm,
+	},
 };
 
 static int s3c2440_lcd_init(void)
@@ -133,7 +243,11 @@ static int s3c2440_lcd_init(void)
 	lcd_regs->lcdcon5 |= (1<<3);
 	/* 4. 注册 */	
 	register_framebuffer(s3c_lcd);	
-	
+
+	/* 添加休眠与唤醒 */
+	register_pm_notifier(&lcd_pm_notif_block);
+	platform_device_register(&lcd_dev);
+	platform_driver_register(&lcd_drv);
 	return 0;
 }
 
@@ -150,7 +264,9 @@ static void s3c2440_lcd_exit(void)
 	iounmap(gpgcon);	
 	framebuffer_release(s3c_lcd);
 
-	
+	unregister_pm_notifier(&lcd_pm_notif_block); /* 通知内核关闭设备 */
+	platform_device_unregister(&lcd_dev);
+	platform_driver_unregister(&lcd_drv);
 }
 
 module_init(s3c2440_lcd_init);
