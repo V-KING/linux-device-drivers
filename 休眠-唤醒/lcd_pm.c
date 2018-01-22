@@ -65,12 +65,28 @@ static int s3c_lcdfb_setcolreg(unsigned int regno, unsigned int red,
 	return 0;
 }
 
+static int mylcd_open(struct fb_info *info, int user)
+{
+	pm_runtime_get_sync(&lcd_dev.dev);
+	return 0;
+}
+
+static int mylcd_release(struct fb_info *info, int user)
+{
+	/* autosuspend: 如果不想让设备频繁地开关,使用autosuspend功能 */
+	pm_runtime_mark_last_busy(&lcd_dev.dev);
+	pm_runtime_put_sync_autosuspend(&lcd_dev.dev);
+	return 0;
+}
+
 static struct fb_ops s3c_lcdfb_ops = {	
 	.owner		= THIS_MODULE,	
 	.fb_setcolreg	= s3c_lcdfb_setcolreg,	
 	.fb_fillrect	= cfb_fillrect,	
 	.fb_copyarea	= cfb_copyarea,	
 	.fb_imageblit	= cfb_imageblit,
+	.fb_open = mylcd_open,
+	.fb_release = mylcd_release,
 };
 
 static int lcd_suspend_notifier(struct notifier_block *nb, unsigned long event, void *dummy)
@@ -146,16 +162,22 @@ static int lcd_resume(struct device *dev)
 
 static struct dev_pm_ops lcd_pm = {
 	.suspend = lcd_suspend,
-	.resume   = lcd_resume, 	
+	.resume   = lcd_resume, 
+	.runtime_suspend = lcd_suspend,
+	.runtime_resume = lcd_resume,
 }; 
 
 static int lcd_probe(struct platform_device *pdev)
 {
+	pm_runtime_set_active(&pdev->dev);
+	pm_runtime_use_autosuspend(&pdev->dev); /* suspend + timer */
+	pm_runtime_enable(&pdev->dev);
 	return 0;
 }
 
 static int lcd_remove(struct platform_device *pdev)
 {
+	pm_runtime_disable(&pdev->dev);
 	return 0;
 }
 
