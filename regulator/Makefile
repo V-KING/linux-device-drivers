@@ -10,4 +10,3 @@ clean:
 obj-m	+= regulator.o
 obj-m 	+= machine.o
 obj-m 	+= consumer_lcd.o
-	
