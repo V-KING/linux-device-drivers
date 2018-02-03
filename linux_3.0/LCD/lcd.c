@@ -23,6 +23,29 @@
 #include <asm/arch/regs-gpio.h>
 #include <asm/arch/fb.h>
 
+
+
+
+static struct fb_info *exy4412_lcd;
+static volatile unsigned long *gpf0con;
+static volatile unsigned long *gpf1con;
+static volatile unsigned long *gpf2con;
+static volatile unsigned long *gpf3con;
+
+static volatile unsigned char *gpl1con;
+static volatile unsigned char *gpl1dat;
+static u32 pseudo_palette[16];
+/* RGB interface  LCDBLKC_CFG (0x1001_0210)*/
+static struct lcd_regs = {
+	unsigned long VIDCON0;/0x11C0_0000/
+	unsigned long VIDCON1;
+	unsigned long VIDCON2;
+	
+
+};
+
+static struct lcd_regs *lcd_regs;
+
 static inline unsigned int chan_to_field(unsigned int chan, struct fb_bitfield *bf)
 {
 	chan &= 0xffff;
@@ -48,16 +71,6 @@ static int exy4412_lcdfb_setcolreg(unsigned int regno, unsigned int red,
 	pseudo_palette[regno] = val;
 	return 0;
 }
-
-
-static struct fb_info *exy4412_lcd;
-static volatile unsigned long *gpf0con;
-static volatile unsigned long *gpf1con;
-static volatile unsigned long *gpf2con;
-static volatile unsigned long *gpf3con;
-
-
-static u32 pseudo_palette[16];
 
 static struct fb_ops exy4412_lcd_fop = {
 	.owner		= THIS_MODULE,
@@ -108,16 +121,34 @@ static int lcd_init(void)
 	gpf1con = ioremap(0x114001A0, 4);
 	gpf2con = ioremap(0x114001C0, 4);
 	gpf3con = ioremap(0x114001E0, 4);
-
+										
+	gpl1con = ioremap(0x110000E0, 1);
+	gpl1dat = ioremap(0x110000E4, 1);
+	/* GPL1_0 LCD_PWDN	 */
+	/* lcd 用的引脚设置为输出 */
 	*gpf0con = 0x11111111;/* HSYNC VSYNC DEN VOTCLK VD0-3 */
 	*gpf1con = 0x11111111;/* VD4-11 */
 	*gpf2con = 0x11111111;/* VD12-19 */
-	*gpf3con &= 0xff000000;
-	*gpf3con |= 0x00111111;/* VD20-23 LDI OE*/
+	*gpf3con &= 0xffff0000;
+	*gpf3con |= 0x00001111;/* VD20-23 */
+	
+	/* 电源引脚设置输出并输出为1 */
+	*gpl1con &= 0xf0;
+	*gpl1con |= 0x01;
+	*gpl1dat |= 0x01;  /* GPL1_0 输出高电平 */
+
+	/* 设置display_control */
+	lcd_regs = ioremap(0x11C0_0000 , sizeof(struct lcd_regs));
+
+	/* VIDCON0 
+	  * [31] 	0
+	  * [30]	1	enable
+	  * [29]	0
+	  * [28:26]	000 RGB
+	  * [18]	1 = RGB serial format
+	  * [0:1]	11 display on*/
 
 	
-	
-
 
 	exy4412_lcd->fix.smem_start = 		/* 显存的地址 */
 	register_framebuffer(exy4412_lcd);
